@@ -75,6 +75,10 @@ static inline int in_heap(const void* p) {
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))
 
+/* alignment */
+#define ALIGNMENT   8
+#define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
+
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc)  ((size) | (alloc))
 #define SUPER_PACK(size, prev_free, alloc)  ((size) | (prev_free) | (alloc)) 
@@ -106,13 +110,14 @@ static inline char* PREV_BLKP(void *bp);
 
 static inline void SET_FREE(void *bp);
 static inline void SET_ALOC(void *bp);
-static inline void SET_PRE_FREE(void *bp);
-static inline void SET_NEXT_FREE(void * bp, char * p);
-static inline void SET_PRE_ALOC(void *bp);
+static inline void SET_PREV_FREE(void *bp, char *p);
+static inline void SET_NEXT_FREE(void *bp, char *p);
+static inline void SET_PREV_ALOC(void *bp);
 
 static inline void SET_SIZE(void * bp, size_t size); // used for coalesce 
 
 static inline int GET_LEVEL(size_t size);
+static inline char **GET_GROUP_ENTRY(int level); // entry of a free list
 static inline void* PREV_FREE(void * bp);
 static inline void* NEXT_FREE(void * bp); /* next free block */
 
@@ -158,7 +163,7 @@ static inline char* HDRP(void *p) {
 // ALARM: this only works for free block
 static inline char* FTRP(void *p) {
     // #define FTRP(bp)       ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
-    return ((char *)(p) + GET_SIZE(HDRP(bp)) - WSIZE);
+    return ((char *)(p) + GET_SIZE(HDRP(p)) - WSIZE);
 }
 
 static inline char* NEXT_BLKP(void *p) {
@@ -178,16 +183,21 @@ static inline void SET_ALOC(void *bp) {
 }
 
 static inline void SET_FREE(void *bp) {
+    // flag indicate free/allocate of previous block
     PUT(bp, GET(bp) & ~1);
 }
 
-static inline void SET_PRE_FREE(void *bp){
-    // flag indicate free/allocate of previous block
-    PUT(bp, GET(bp) & ~0x2);	
+static inline void SET_PREV_FREE(void *bp, char *p){
+    int off = p ? p - heap_listp : -1;
+    PUT(bp, off);
 }
 
-static inline void SET_PRE_ALOC(void *bp){
+static inline void SET_PREV_ALOC(void *bp){
     PUT(bp, GET(bp) | 0x2);
+}
+
+static inline void SET_PREV_FREE_FLAG(void *bp) {
+    PUT(bp, GET(bp) & ~0x2);
 }
 
 static inline void SET_NEXT_FREE(void * bp, char * p) {
@@ -209,6 +219,11 @@ static inline int GET_LEVEL(size_t size) {
     }
     
     return r - 1;
+}
+
+static inline char **GET_GROUP_ENTRY(int level) {
+    char * bp = free_table + (level * DSIZE);
+    return (char **)(bp);
 }
 
 static inline void* PREV_FREE(void * bp) {
@@ -300,8 +315,8 @@ int mm_init(void) {
     free_table = heap_listp;
     memset(free_table, 0, SEGLEVEL*DSIZE); // initialize the free table with 0s
     
-    SET_PRE_ALOC(heap_listp + offset); // header
-    SET_PRE_ALOC(heap_listp + offset + 4); // Segregated Free List
+    SET_PREV_ALOC(heap_listp + offset); // header
+    SET_PREV_ALOC(heap_listp + offset + 4); // Segregated Free List
     
     heap_listp += (offset + WSIZE);
     
@@ -362,8 +377,6 @@ void free (void *ptr) {
         return;
     }
 
-    size_t size = GET_SIZE(HDRP(ptr));
-
     if (heap_listp == 0){
         mm_init();
     }
@@ -389,7 +402,7 @@ static void *coalesce(void *bp)
             heap_endp = bp;
         }
         // free block in the middle
-        delete_node(get_level(GET_SIZE(HDRP(NEXT_BLKP(bp)))), NEXT_BLKP(bp));
+        delete_node(GET_LEVEL(GET_SIZE(HDRP(NEXT_BLKP(bp)))), NEXT_BLKP(bp));
         
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), SUPER_PACK(size, 0x02, 0));
@@ -399,7 +412,7 @@ static void *coalesce(void *bp)
     else if (!prev_alloc && next_alloc) {      /* Case 0 0 1 */
         int c = (bp == heap_endp); // free end of heap
         
-        delete_node(get_level(GET_SIZE(HDRP(PREV_BLKP(bp)))), PREV_BLKP(bp));
+        delete_node(GET_LEVEL(GET_SIZE(HDRP(PREV_BLKP(bp)))), PREV_BLKP(bp));
         
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         SET_SIZE(FTRP(bp), size); // new size
@@ -415,8 +428,8 @@ static void *coalesce(void *bp)
     else {                                     /* Case 0 0 0 */
         int c = (NEXT_BLKP(bp) == heap_endp); // free one block before end of heap
         
-        delete_node(get_level(GET_SIZE(HDRP(PREV_BLKP(bp)))), PREV_BLKP(bp));
-        delete_node(get_level(GET_SIZE(HDRP(NEXT_BLKP(bp)))), NEXT_BLKP(bp));
+        delete_node(GET_LEVEL(GET_SIZE(HDRP(PREV_BLKP(bp)))), PREV_BLKP(bp));
+        delete_node(GET_LEVEL(GET_SIZE(HDRP(NEXT_BLKP(bp)))), NEXT_BLKP(bp));
         
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
         
@@ -429,8 +442,8 @@ static void *coalesce(void *bp)
             heap_endp = bp;
         }
     }
-    SET_PRE_FREE(HDRP(NEXT_BLKP(bp)));
-    insert_node(get_level(GET_SIZE(HDRP(bp))), bp); // update free list
+    SET_PREV_FREE_FLAG(HDRP(NEXT_BLKP(bp)));
+    insert_node(GET_LEVEL(GET_SIZE(HDRP(bp))), bp); // update free list
     return bp;
 }
 
@@ -544,7 +557,7 @@ void *calloc (size_t nmemb, size_t size) {
     return newptr;
 }
 
-static void checkfreetbl() {
+static void checkfreetable() {
     printf("Free table:\n");
     for (int i = 0; i < SEGLEVEL; i++) {
         char * bp = free_table + (i*DSIZE);
@@ -570,7 +583,7 @@ static void printblock(void *bp)
     } else {
         printf("%p: header: [%u:%c], footer: [%u, %c], prev[%p], next[%p], prev_alloc: [%d]\n", 
             bp, (unsigned)hsize, (halloc ? 'a' : 'f'), GET_SIZE(FTRP(bp)), (GET_ALLOC(FTRP(bp)) ? 'a' : 'f'), 
-            prev_free(bp), next_free(bp), GET(HDRP(bp))&0x02);
+            (void *)PREV_FREE(bp), (void *)NEXT_FREE(bp), GET(HDRP(bp))&0x02);
     }
 
 }
@@ -657,9 +670,9 @@ static void place(void *bp, size_t asize)
     size_t csize = GET_SIZE(HDRP(bp));
     
     if ((csize - asize) >= (2*WSIZE)) { // min. requirement
-    	int c = (bp == heap_tailp);
+    	int c = (bp == heap_endp);
     	
-    	delete_node(get_level(GET_SIZE(HDRP(bp))), bp);
+    	delete_node(GET_LEVEL(GET_SIZE(HDRP(bp))), bp);
     	
     	SET_SIZE(HDRP(bp), asize);
     	SET_ALOC(HDRP(bp));
@@ -668,16 +681,16 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), SUPER_PACK(csize-asize, 0x02, 0));
         PUT(FTRP(bp), SUPER_PACK(csize-asize, 0x02, 0));
         
-        insert_node(get_level(GET_SIZE(HDRP(bp))), bp);
+        insert_node(GET_LEVEL(GET_SIZE(HDRP(bp))), bp);
         
         if (c) {
             heap_endp = bp;
         }
     }
     else {
-        delete_node(get_level(GET_SIZE(HDRP(bp))), bp);
+        delete_node(GET_LEVEL(GET_SIZE(HDRP(bp))), bp);
         SET_ALOC(HDRP(bp));
-        SER_PRE_ALOC(HDRP(NEXT_BLKP(bp)));
+        SET_PREV_ALOC(HDRP(NEXT_BLKP(bp)));
     }
 }
 
@@ -687,11 +700,11 @@ static void *find_fit(size_t asize)
     void *bp;
     char *group_head;
     
-    int level = get_level(asize);
+    int level = GET_LEVEL(asize);
 
     while (level < SEGLEVEL) { // serach in the size-class from small to large
-        group_head = *(get_head(level));
-        for (bp = group_head; bp && GET_SIZE(HDRP(bp)) > 0; bp = next_free(bp)) {
+        group_head = *(GET_GROUP_ENTRY(level));
+        for (bp = group_head; bp && GET_SIZE(HDRP(bp)) > 0; bp = NEXT_FREE(bp)) {
             if (asize <= GET_SIZE(HDRP(bp))) {
                 return bp;
             }
