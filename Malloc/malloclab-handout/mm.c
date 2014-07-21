@@ -144,12 +144,16 @@ static inline int block_alloc(const void* block) {
 }
 /* Given block ptr bp, compute address of its header and footer */
 static inline char* block_header(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
     // #define HDRP(bp)       ((char *)(bp) - WSIZE)
     return ((char *)(block) - 4);
 } 
 
 // ALARM: this only works for free block
 static inline char* block_footer(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
     // #define (bp)       ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
     return ((char *)(block) + block_size(block_header(block)) - WSIZE);
 }
@@ -168,71 +172,82 @@ static inline char* block_prev(void* const block) {
     // #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
     return ((char *)(block) - block_size(((char *)(block) - WSIZE)));
 }
-static inline void set_aloc(void *bp) {
+static inline void set_aloc(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
     // flag indicate free/allocate of this block
-    put(bp, (get(bp) | 1));
+    put(block, (get(block) | 1));
 }
 
-static inline void set_free(void *bp) {
-    put(bp, get(bp) & ~1);
+static inline void set_free(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    put(block, get(block) & ~1);
 }
 
-static inline void set_prev_free(void *bp, char *p){
+static inline void set_prev_free(void *block, char *p){
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
     // set 'p' to be previous free block of 'bp' in free list
-    put((char*)bp, p - heap_listp);
+    put((char*)block, p - heap_listp);
 }
 
-static inline void set_next_free(void * bp, char * p) {
-    put((char*)(bp) + 4, p - heap_listp);
+static inline void set_next_free(void * block, char * p) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    put((char*)(block) + 4, p - heap_listp);
 }
 
-static inline void set_prev_aloc_flag(void *bp){
+static inline void set_prev_aloc_flag(void *block){
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
     // flag indicate free/allocate of previous block
-    put(bp, get(bp) | 0x02);
+    put(block, get(block) | 0x02);
 }
 
-static inline void set_prev_free_flag(void *bp) {
-    put(bp, get(bp) & ~0x02);
+static inline void set_prev_free_flag(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    put(block, get(block) & ~0x02);
 }
 
-static inline void set_size(void * bp, size_t size) {
-    unsigned flag = get(bp) & 0x03;
-    put(bp, size|flag);
+static inline void set_size(void * block, size_t size) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    put(block, PACK(size, (unsigned)get(block) & 0x03));
 }
 
 static inline int get_level(size_t size) {
     int r = 0, s = 16;
-    
-    while ((int)size > s - 1 && r < SEGLEVEL) {
-        s <<= 1;
+    while ((int)size > s-1 && r < SEGLEVEL) {
+        s = s << 1; // double the size
         r++;
     }
-    
     return r - 1;
 }
 
 // get the head of free list
 static inline char **get_head(int level) {
-    char *bp = free_table + (level * DSIZE);
-    return (char **)(bp);
+    return (char **)(free_table + (level * DSIZE));
 }
 // get the end of free list
 static inline char **get_end(int level) {
-    char *bp = free_table + (level * DSIZE) + WSIZE;
-    return (char **)(bp);    
+    return (char **)(free_table + (level * DSIZE) + WSIZE);    
 }
 
-static inline void* prev_free(void * bp) {
-    int off = get(bp);
+static inline void* prev_free(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    int off = get(block);
     if (off < 0) return NULL;
     return heap_listp + off;
 }
 
-static inline void* next_free(void *bp) {
-    int off = get((char*)(bp) + 4);
-    if (off < 0) 
-        return NULL;
-  
+static inline void* next_free(void *block) {
+    REQUIRES(block != NULL);
+    REQUIRES(in_heap(block));                             
+    int off = get((char*)(block) + 4);
+    if (off < 0)  return NULL;
     return heap_listp + off;
 } 
 
