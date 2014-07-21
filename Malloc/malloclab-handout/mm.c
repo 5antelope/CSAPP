@@ -2,6 +2,22 @@
  * mm.c
  * Yang Wu
  * 
+ * Data Structure to organize block:
+ *     Segregated free lists
+ *     | prologue | free list table | blocks | epilogue |
+ * ----------------------------------------------------------------------------- 
+ *
+ * Algorithms to scan free blocks:
+ *     First fit
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * Block Design:
+ *     | header | payload |                             -[allocated]
+ *     | header | prev free | next free | footer |      -[free]: at least 16 bytes
+ *
+ * -----------------------------------------------------------------------------
+ *
  */
 
 #include <assert.h>
@@ -162,12 +178,12 @@ static inline void set_free(void *bp) {
 }
 
 static inline void set_prev_free(void *bp, char *p){
-    // set previous free block in free list
+    // set 'p' to be previous free block of 'bp' in free list
     put((char*)bp, p - heap_listp);
 }
 
 static inline void set_next_free(void * bp, char * p) {
-    put((char*)block_footer(bp) - 4, p - heap_listp);
+    put((char*)(bp) + 4, p - heap_listp);
 }
 
 static inline void set_prev_aloc_flag(void *bp){
@@ -213,7 +229,7 @@ static inline void* prev_free(void * bp) {
 }
 
 static inline void* next_free(void *bp) {
-    int off = get((char*)block_footer(bp) - 4);
+    int off = get((char*)(bp) + 4);
     if (off < 0) 
         return NULL;
   
@@ -331,7 +347,11 @@ void *malloc (size_t size) {
         available = block_size(block_header(heap_endp)); // get left space if available...
     }
     
-    extendsize = MAX(asize - available, CHUNKSIZE); // use available size to reduce external fragmentation
+    if (asize-available > CHUNKSIZE) {
+        extendsize = asize-available; // use available size to reduce external fragmentation 
+    } else {
+        extendsize = CHUNKSIZE;
+    }
     
     if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
         return NULL;
@@ -360,7 +380,7 @@ static void insert_node(int level, void *bp) {
     char **group_head = (char **)(free_table + (level * DSIZE));
     char **group_end = (char **)(free_table + (level * DSIZE) + WSIZE);
     
-    if (!(*group_head)) {
+    if (*group_head == NULL) {
         // empty list
         *group_head = bp;
         *group_end = bp;
@@ -669,10 +689,10 @@ static void *extend_heap(size_t words)
         return NULL;
     
     /* Initialize free block header/footer and the epilogue header */
-    int prev_alloc = !!(get(block_header(bp)) & 0x02);
+    int prev_alloc = !!(get(block_header(bp)) & 0x02) << 1;   // 8-byte alignment 
     
-    put(block_header(bp), SUPER_PACK(size, prev_alloc << 1, 0));         /* Free block header */
-    put(block_footer(bp), SUPER_PACK(size, prev_alloc << 1, 0));         /* Free block footer */
+    put(block_header(bp), SUPER_PACK(size, prev_alloc, 0));         /* Free block header */
+    put(block_footer(bp), SUPER_PACK(size, prev_alloc, 0));         /* Free block footer */
     
     set_prev_free(bp, NULL);
     set_next_free(bp, NULL);
@@ -724,7 +744,7 @@ static void *find_fit(size_t asize)
     while (level < SEGLEVEL) { // serach in the size-class from small to large
         group_head = *(get_head(level));
         for (bp = group_head; bp && block_size(block_header(bp)) > 0; bp = next_free(bp)) {
-            if (asize <= block_size(block_header(bp))) {
+            if (!block_alloc(block_header(bp)) && asize <= block_size(block_header(bp))) {
                 return bp;
             }
         }
