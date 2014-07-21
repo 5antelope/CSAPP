@@ -1,7 +1,7 @@
 /*
  * mm.c
  * Yang Wu
- *
+ * 
  */
 
 #include <assert.h>
@@ -55,7 +55,7 @@
  */
 #define WSIZE       8       /* Word and header/footer size (bytes) */
 #define DSIZE       16       /* Doubleword size (bytes) */
-#define CHUNKSIZE  (1<<8)  /* Extend heap by this amount (bytes) */
+#define CHUNKSIZE  (1<<12)  /* Extend heap by this amount (bytes) */
 #define SEGLEVEL    16	    /* 16 groups for different sizes */
 #define MAX(x, y) ((x) > (y)? (x) : (y))
 /* alignment */
@@ -116,7 +116,7 @@ static inline unsigned int block_size(const void* block) {
     REQUIRES(block != NULL);
     REQUIRES(in_heap(block));
     // #define GET_SIZE(p)  (GET(p) & ~0x3)
-    return (get(block) & ~0x3);
+    return (get(block) & ~0x03);
 }
 
 // Return true if the block is allocated, false otherwise
@@ -158,26 +158,25 @@ static inline void set_aloc(void *bp) {
 }
 
 static inline void set_free(void *bp) {
-    // flag indicate free/allocate of previous block
     put(bp, get(bp) & ~1);
 }
 
 static inline void set_prev_free(void *bp, char *p){
-    int off = p ? p - heap_listp : -1;
-    put(bp, off);
+    // set previous free block in free list
+    put((char*)bp, p - heap_listp);
+}
+
+static inline void set_next_free(void * bp, char * p) {
+    put((char*)block_footer(bp) - 4, p - heap_listp);
 }
 
 static inline void set_prev_aloc_flag(void *bp){
+    // flag indicate free/allocate of previous block
     put(bp, get(bp) | 0x02);
 }
 
 static inline void set_prev_free_flag(void *bp) {
     put(bp, get(bp) & ~0x02);
-}
-
-static inline void set_next_free(void * bp, char * p) {
-    int off = p ? p - heap_listp : -1;
-    put((char*)block_footer(bp) - 4, off);
 }
 
 static inline void set_size(void * bp, size_t size) {
@@ -207,13 +206,13 @@ static inline char **get_end(int level) {
     return (char **)(bp);    
 }
 
-static inline void* PREV_FREE(void * bp) {
+static inline void* prev_free(void * bp) {
     int off = get(bp);
     if (off < 0) return NULL;
     return heap_listp + off;
 }
 
-static inline void* NEXT_FREE(void *bp) {
+static inline void* next_free(void *bp) {
     int off = get((char*)block_footer(bp) - 4);
     if (off < 0) 
         return NULL;
@@ -248,7 +247,7 @@ static void *find_fit(size_t asize);
 static void *coalesce(void *bp);
 
 static void checkfreetable();
-static void printblock(void *bp);
+static void blockdetails(void *bp);
 static int checkblock(void *bp);
 
 
@@ -384,10 +383,10 @@ static void insert_node(int level, void *bp) {
             // find some place in the list
             char *c = *group_head;
             while (c < (char *)bp) {
-                c = NEXT_FREE(c);
+                c = next_free(c);
             }
-            set_next_free(PREV_FREE(c), bp);
-            set_prev_free(bp, PREV_FREE(c));
+            set_next_free(prev_free(c), bp);
+            set_prev_free(bp, prev_free(c));
             set_prev_free(c, bp);
             set_next_free(bp, c);
         }
@@ -399,22 +398,22 @@ static void delete_node(int level, void *bp) {
     char **group_end = get_end(level);
     
     if (bp == *group_head) {
-        *group_head = NEXT_FREE(bp);
+        *group_head = next_free(bp);
         if (*group_head) {
             set_prev_free(*group_head, NULL);
         } else {
             *group_end = NULL;
         }
     } else if (bp == *group_end) {
-        *group_end = PREV_FREE(bp);
+        *group_end = prev_free(bp);
         if (*group_end) {
             set_next_free(*group_end, NULL);
         } else {
             *group_head = NULL;
         }
     } else {
-        set_next_free(PREV_FREE(bp), NEXT_FREE(bp));
-        set_prev_free(NEXT_FREE(bp), PREV_FREE(bp));
+        set_next_free(prev_free(bp), next_free(bp));
+        set_prev_free(next_free(bp), prev_free(bp));
     }
 }
 
@@ -531,84 +530,130 @@ void *calloc (size_t nmemb, size_t size) {
     return newptr;
 }
 
-static void checkfreetable() {
-    printf("Free table:\n");
-    for (int i = 0; i < SEGLEVEL; i++) {
-        char * bp = free_table + (i*DSIZE);
-        printf("Level %d: head[%p], tail[%p]\n", i, *(char **)bp, *(char **)(bp + WSIZE));
+static void checkfreetable(int verbose) {
+     // unfinished!
+    
+    /*
+     * All next/previous pointers are consistent 
+     * All free list pointers points between mem heap lo() and mem heap hi().
+     * Count free blocks by iterating through every block and traversing free list by pointers and see if they match.
+     * All blocks in each list bucket fall within bucket size range (segregated list).
+     */
+    printf("Free table test...\n");
+    if (verbose) {
+        for (int i = 0; i < SEGLEVEL; i++) {
+            char * bp = free_table + (i*DSIZE);
+            if (!in_heap(bp)) {
+                //free list pointers points between mem heap lo() and mem heap hi()                       
+                printf("free list [%p] at level - %d is out of heap...\n", *(char **)bp, i);                             
+            }
+            printf("Level %d: head[%p], tail[%p]\n", i, *(char **)bp, *(char **)(bp + WSIZE));
+        }
     }
 }
 
-static void printblock(void *bp) 
+static void blockdetails(void *block) 
 {
-    size_t hsize, halloc;
+    /* 
+     * Check each block’s header and footer: 
+     * size (minimum size, alignment), previous/next allo- cate/free bit consistency, 
+     * header and footer matching each other.
+     */
+    size_t size, alloc;
 
-    hsize = block_size(block_header(bp));
-    halloc = block_alloc(block_header(bp));  
+    size = block_size(block_header(block));
+    alloc = block_alloc(block_header(block));  
 
-    if (hsize == 0) {
-        printf("%p: EOL, prev_alloc: [%d]\n", bp, get(block_header(bp)) & 0x02);
+    if (size == 0) {
+        printf("%p: empty, prev_alloc: [%d]\n", block, get(block_header(block)) & 0x02);
         return;
     }
 
-    if (halloc){
-        printf("%p: header: [%u:%c], prev_alloc: [%d]\n", 
-            bp, (unsigned)hsize, (halloc ? 'a' : 'f'), get(block_header(bp)) & 0x02);
-    } else {
-        printf("%p: header: [%u:%c], footer: [%u, %c], prev[%p], next[%p], prev_alloc: [%d]\n", 
-            bp, (unsigned)hsize, (halloc ? 'a' : 'f'), block_size(block_footer(bp)), (block_alloc(block_footer(bp)) ? 'a' : 'f'), 
-            (void *)PREV_FREE(bp), (void *)NEXT_FREE(bp), get(block_header(bp)) & 0x02);
-    }
+    if (alloc){
+        printf("%p: [size: %u; allocated/free: %c; prev_alloc: %d]\n", 
+            block, (unsigned)size, (alloc ? 'a' : 'f'), get(block_header(block)) & 0x02);
+    } 
 
 }
 
 static int checkblock(void *bp) 
 {
+    // unfinished!
+    
+    /*
+     * Check epilogue and prologue blocks.
+     * Check each block’s address alignment.
+     * Check heap boundaries.
+     * Check coalescing: no two consecutive free blocks in the heap.
+     */
     if ((size_t)bp % 8) {
-        printf("Error: %p is not doubleword aligned\n", bp);
-        return -1;
+        // check alignment
+        printf("%p is not well aligned!\n", bp);
+        return 1;
     }
-    if (!block_alloc(block_header(bp))) { // free block
+    
+    if (!block_alloc(block_header(bp))) { 
         if (block_size(block_header(bp)) != block_size(block_footer(bp))) {
-            printf("Error: header does match footer.\n");
-            return -1;
+            printf("header & footer do not match size!\n");
+            return 1;
         }
     }
+    
+    if (!in_heap(bp)) {
+        // boundary error
+        printf("boundary error!\n");
+        return 1;
+    }
+    
+    if ((unsigned)block_alloc(block_header(bp)) != get(prev_free(block_next(bp))) ) {
+        printf("prev_free flag error!\n");
+        return 1;
+    }
+    
+    if (!block_alloc(block_header(bp)) && !block_alloc(block_header(block_next(bp)))) {
+        printf("two consecutive free blocks in the heap!\n");
+        return 1;
+    }
+    
     return 0;
 }
 
 
 // Returns 0 if no errors were found, otherwise returns the error
 int mm_checkheap(int verbose) {
+    // check heap   
     char *bp = heap_listp;
-    checkfreetable();
     
     if (verbose)
         printf("Heap (%p):\n", heap_listp);
         
-    if ((block_size(block_header(heap_listp)) != 4) || !block_alloc(block_header(heap_listp))) {
-    	printf("Bad prologue header\n");
-    	return 1;
+    if (!block_alloc(block_header(heap_listp))) {
+        // check prologue allocated;
+        printf("Prologue Malicious\n");
+        return 1;
     }
         
     if (verbose) {
-        printblock(heap_listp);	
+        printf("Heap...\n");
+        blockdetails(heap_listp);	
     }
         
     for (bp = block_next(heap_listp); block_size(block_header(bp)) > 0; bp = block_next(bp)) {
         if (verbose) {
-            printblock(bp);	
-        } 
+            // printf("Block...");                         
+            blockdetails(bp);	
+        }
+        // dive into the detial info about block
         checkblock(bp);
     }    
-    
-    if (verbose)
-        printblock(bp);
         
-    if ((block_size(block_header(bp)) != 0) || !(block_alloc(block_header(bp)))) {
-        printf("Bad epilogue header\n");        
+    if (!(block_alloc(block_header(bp)))) {
+        printf("Epilogue Malicious\n");        
         return 1;
     }
+    
+    // check free list
+    checkfreetable(verbose);
     
     return 0;
 }
@@ -619,7 +664,7 @@ static void *extend_heap(size_t words)
     size_t size;
     
     /* Allocate an even number of words to maintain alignment */
-    size = (words % 2) ? words * WSIZE : (words+1) * WSIZE;
+    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
     if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
     
@@ -678,7 +723,7 @@ static void *find_fit(size_t asize)
 
     while (level < SEGLEVEL) { // serach in the size-class from small to large
         group_head = *(get_head(level));
-        for (bp = group_head; bp && block_size(block_header(bp)) > 0; bp = NEXT_FREE(bp)) {
+        for (bp = group_head; bp && block_size(block_header(bp)) > 0; bp = next_free(bp)) {
             if (asize <= block_size(block_header(bp))) {
                 return bp;
             }
