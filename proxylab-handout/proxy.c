@@ -8,6 +8,9 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
+jmp_buf pipe_buf; /* non-local return for SIGPIPE handler */
+jmp_buf error_buf; /* non-local return for IO error */
+
 /* You won't lose style points for including these long lines in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
@@ -71,6 +74,7 @@ int main(int argc, char *argv[]) {
 
 void sigpipe_handler(int sig) {
 	//unfinished...
+    siglongjmp(pipe_buf, -1);
 }
 
 /*
@@ -84,7 +88,10 @@ void routine(void *connfd) {
 	char cache_data[MAX_OBJECT_SIZE];
 	int client_fd = *(int *)connfd;
 	int server_fd = -1;
-
+    int rp;
+    
+    rp = sigsetjmp(pipe_buf, 1);
+    
 	int ack = Send(client_fd, &server_fd, cache_tag, cache_data, &cache_length);
 
 	switch (ack) {
@@ -108,7 +115,7 @@ void routine(void *connfd) {
 int Send(int fd, int *server_fd, char *cache_tag, void *cache_data, unsigned int *cache_length) {
 	char buf[MAXLINE], 
          init_request[MAXLINE],
-         init_header[MAXLINE].
+         init_header[MAXLINE],
          request_buf[MAXLINE],         
          method[MAXLINE], 
          protocol[MAXLINE],
