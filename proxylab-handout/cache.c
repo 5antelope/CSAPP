@@ -1,14 +1,10 @@
 /*
- * cache.c: implementation of cache
+ * handle caching
  */
 
 #include "cache.h"
 
-/*
- * init_cache - init a cache list
- *
- * return value: a poiner points to a cache list
- */
+
 void *init_cache(cache_t *c) {
 
     c->head = NULL;
@@ -51,8 +47,7 @@ cache_node *find(cache_t *c, char *tag) {
 }
 
 /*
- * insert - Add a cache node to the rear of the
- * cache list
+ * insert - Add a cache node to the rear of cache 
  */
 void insert(cache_t *c, cache_node *node) {
     if (c->head == NULL) {
@@ -65,16 +60,10 @@ void insert(cache_t *c, cache_node *node) {
     }
 }
 
-/*
- * delete_cache_node - Delete a cache node whose id is equal to the
- * specified id from the cache list
- * 
- * return value: NULL if cannot find the cache node
- *               else return pointer to the cache node   
- */
 cache_node *evict(cache_t *c, char *tag) {
     cache_node *prev_node = NULL;
     cache_node *cur_node = c->head;
+    
     while (cur_node != NULL) {
         if (!strcmp(cur_node->tag, tag)) {
             if (c->head == cur_node) {
@@ -96,6 +85,7 @@ cache_node *evict(cache_t *c, char *tag) {
         prev_node = cur_node;
         cur_node = cur_node->next;
     }
+    
     return NULL;
 }
 
