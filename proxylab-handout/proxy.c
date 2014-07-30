@@ -1,265 +1,247 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "csapp.h"
+#include "cache.h"
 
+/* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
-static char *user_agent = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
-static char *accepts = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-static char *accept_encoding = "Accept-Encoding: gzip, deflate";
-static char *connections = "Connection: close";
-static char *proxy_conns = "Proxy-Connection: close";
+/* You won't lose style points for including these long lines in your code */
+static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
+static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
+static const char *connection_hdr = "Connection: close\r\n";
+static const char *proxy_connection_hdr = "Proxy-Connection: close\r\n";
 
-typedef char header_t[40][2][MAXLINE];
+/* Function prototypes */
 
-jmp_buf pipe_buf; /* non-local return for SIGPIPE handler */
-jmp_buf error_buf; /* non-local return for IO error */
-
-/*********************************
- * Function prototype
- *********************************/
-void serve_client(int fd);
-void request(int fd, char *hostp, char *pathp, int port, header_t headers, int hc);
-
-int need_header(char *k, header_t headers, int *hc);
-void append_header(char *k, char *v, header_t headers, int *hc);
-int parse_header(rio_t *rp, header_t headers, int *hc);
-int is_header(char *s);
-void client_error(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
-int parse_uri(char *uri, char *target_addr, char *path, int  *port);
-
+/* SIGPIPE handler */
 void sigpipe_handler(int sig);
+void routine(void *connfd);
+//int Send(int fd, int *server_fd, char *cache_tag, void *cache_data, unsigned int *cache_length);
+int fetch_cache(int client_fd, void *cache_data, unsigned int cache_length);
+int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data);
+void parse_request(char *buf, char *method, char *protocol, char *host_port, char *resource, char *version);
+void parse_port(char *host_port, char *remote_host, char *remote_port);
+int append_data(char *content, unsigned int *content_length, char *buf, unsigned int length);
+void get_size(char *buf, unsigned int *size_pointer);
+/* End of function prototypes */
 
+cache_t *cache = NULL;
 
-int main(int argc, char **argv){
-    int listenfd, connfd, port, clientlen;
+/* Main function */
+int main(int argc, char *argv[]) {
+    int listenfd, port, clientlen, *connfd; // use pointer for connfd: cuz of malloc
     struct sockaddr_in clientaddr;
-
-    /* Check arguments */
-    if (argc != 2) {
-       fprintf(stderr, "Usage: %s <port number>\n", argv[0]);
-       exit(0);
-    }
-    port = atoi(argv[1]);
-    listenfd = Open_listenfd(port);
+    pthread_t tid;
 
     /* installing signal handler */
     Signal(SIGPIPE, sigpipe_handler);
 
-    while (1) {
-        clientlen = sizeof(clientaddr);
-        connfd = Accept(listenfd, (SA *)&clientaddr, (socklen_t*)&clientlen);
-        //dbg_printf("[Connected %d]\n", (int)connfd);
-        serve_client(connfd);  
-        Close(connfd); 
-        //dbg_printf("[Disconnected %d]\n", (int)connfd);
-    }
-    //dbg_printf("server dies....\n");
-    Close(listenfd);
-    exit(0);
-}
+    /* Check command line args */
+	if (argc != 2) {
+	    fprintf(stderr, "usage: %s <port>\n", argv[0]);
+	    exit(1);
+	}
 
-/*********************************
- * Internal Helper functions
- *********************************/
-void serve_client(int fd) {
-    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE], host[MAXLINE], path[MAXLINE];
-    header_t headers; /* header provided by user agent and proxy server */
-    int hc = 0; /* header count */
-    int port, rc;
-    rio_t rio;
-  
-    rc = sigsetjmp(pipe_buf, 1);
-    if (rc != 0) 
-        return; /* back from error(SIGPIPE), return and continue */
-    rc = setjmp(error_buf);
-    if (rc != 0)
-        return; /* back from various error, return and continue */
+	port = atoi(argv[1]); // port number from command line
+	cache = (cache_t *)malloc(sizeof(cache_t));
+	init_cache(cache); // initiate proxy cache
 
-    /* Read request line and headers */
-    Rio_readinitb(&rio, fd);
-    if (Rio_readlineb(&rio, buf, MAXLINE) <= 0)
-        return;
-    sscanf(buf, "%s %s %s", method, uri, version);       
-    if (strcasecmp(method, "GET")) {                     
-        client_error(fd, method, "501", "Not Implemented", "Does not implement this method");
-        return;
-    }
-    if (strlen(uri) == 0) {
-        client_error(fd, uri, "400", "Bad Request", "Missing uri");
-        return;
-    }
-    if (strcasecmp(version, "HTTP/1.0") && strcasecmp(version, "HTTP/1.1")) {
-        client_error(fd, version, "400", "Bad Request", "Version not match");
-        return;
-    }                                                                                                                                                            
-    if (parse_uri(uri, host, path, &port) < 0) {
-        client_error(fd, uri, "400", "Bad Request", "Malformed uri");
-        return;
-    }
-    if (parse_header(&rio, headers, &hc) < 0) {
-        client_error(fd, uri, "400", "Bad Request", "Incomplete requset");
-        return;
-    }
-    append_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3", headers, &hc);
-    append_header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", headers, &hc);
-    append_header("Accept-Encoding", "gzip, deflate", headers, &hc);
-    append_header("Connection", "close", headers, &hc);
-    append_header("Proxy-Connection", "close", headers, &hc);
-    
-    if (need_header("Host", headers, &hc)) 
-        append_header("Host", host, headers, &hc);
-    request(fd, host, path, port, headers, hc);
-}
-
-int parse_header(rio_t *rp, header_t headersp, int *hc) {
-    *hc = 0;
-    char buf[MAXLINE], k[MAXLINE], v[MAXLINE];
-    char *tok;
-
-    if (Rio_readlineb(rp, buf, MAXLINE) <= 0)
-        return -1; // user cancel input
-
-    while(strcmp(buf, "\r\n") && strcmp(buf, "\n")) {
-        tok = strchr(buf, ':');
-        if (!tok) {
-            return -1; // not key-value pair
-        } else {
-            *tok = '\0';
-            strcpy(k, buf);
-            tok += 1;
-            if (strlen(tok) < 3) return -1; // value too short
-            tok[strlen(tok)-2] = '\0';
-            strcpy(v, tok+1);
-            if (need_header(k, headersp, hc)) {
-                append_header(k, v, headersp, hc);
-            }
-        }
-        Rio_readlineb(rp, buf, MAXLINE);
-    }
+	if ((listenfd = Open_listenfd(port)) < 0) {
+		fprintf(stderr, "invalidate port: %d\n", port);
+	}
+	
+	while (1) {
+	    clientlen = sizeof(clientaddr);
+	    int c;
+	    for (c=0; (connfd = (int *)malloc(sizeof(int))) == NULL; c++) {
+	    	if (c>10)
+	    		break; // MAX_CACHE_SIZE = 1 MiB	    	
+	    }
+	    *connfd = Accept(listenfd, (SA *)&clientaddr, (socklen_t *)&clientlen);
+	    // create a new thread.. routine: 
+	    Pthread_create(&tid, NULL, (void * )routine, (void *)connfd);
+	    
+	}
     return 0;
-}
-
-void request(int proxyufd, char *hostp, char *pathp, int port, header_t headers, int hc) {
-    //dbg_printf("[request %d] started.\n", (int)proxyufd);
-    rio_t rio;
-    char buf[MAXLINE];
-    int clientfd = Open_clientfd(hostp, port);
-
-    Rio_readinitb(&rio, clientfd);
-    sprintf(buf, "GET %s HTTP/1.0\r\n", pathp);
-    //dbg_printf("[request %d] %s", (int)proxyufd, buf);
-    rio_writen(clientfd, buf, strlen(buf));
-
-    int i;
-    for (i = 0; i < hc; ++i) {
-        sprintf(buf, "%s: %s\r\n", headers[i][0], headers[i][1]);
-        rio_writen(clientfd, buf, strlen(buf));
-    }
-
-    sprintf(buf, "\r\n");
-    rio_writen(clientfd, buf, strlen(buf));
-
-    i = 0;
-    //dbg_printf("[request %d] forwarding.", (int)proxyufd);
-    while (Rio_readlineb(&rio, buf, MAXLINE)) {
-        i++;
-        if (i % 10 == 0)
-            //dbg_printf(".");
-        rio_writen(proxyufd, buf, strlen(buf));
-    }
-    //dbg_printf("\n[request %d] forwarding done.\n", (int)proxyufd);    
-}
-
-void client_error(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg) {
-    char buf[MAXLINE], body[MAXBUF];
-
-    /* Build the HTTP response body */
-    sprintf(body, "<html><title>Tiny Error</title>");
-    sprintf(body, "%s<body bgcolor=""ffffff"">\r\n", body);
-    sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
-    sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
-    sprintf(body, "%s<hr><em>The Tiny Web server</em>\r\n", body);
-
-    /* Print the HTTP response */
-    sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-    rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Content-type: text/html\r\n");
-    rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
-    rio_writen(fd, buf, strlen(buf));
-    rio_writen(fd, body, strlen(body));
-}
-
-/*
- * parse_uri - URI parser
- * 
- * Given a URI from an HTTP proxy GET request (i.e., a URL), extract
- * the host name, path name, and port.  The memory for hostname and
- * pathname must already be allocated and should be at least MAXLINE
- * bytes. Return -1 if there are any problems.
- */
-int parse_uri(char *uri, char *hostname, char *pathname, int *port)
-{
-    char *hostbegin;
-    char *hostend;
-    char *pathbegin;
-    int len;
-
-    if (strncasecmp(uri, "http://", 7) != 0) {
-       hostname[0] = '\0';
-       return -1;
-    }
-       
-    /* Extract the host name */
-    hostbegin = uri + 7;
-    hostend = strpbrk(hostbegin, " :/\r\n\0");
-    if (!hostend) {
-        hostend = hostbegin + strlen(hostbegin);
-        hostend[0] = '/';
-        hostend[1] = '\0';
-    }
-    len = hostend - hostbegin;
-    strncpy(hostname, hostbegin, len);
-    hostname[len] = '\0';
-    
-    /* Extract the port number */
-    *port = 80; /* default */
-    if (hostend && *hostend == ':')   
-        *port = atoi(hostend + 1);
-    
-    /* Extract the path */
-    pathbegin = strchr(hostbegin, '/');
-    if (pathbegin == NULL) {
-        pathname[0] = '/';
-        pathname[1] = '\0';
-    } else {
-        strcpy(pathname, pathbegin);
-    }
-    return 0;
-}
-
-int need_header(char *k, header_t headers, int *hc) {
-    // preset headers
-    if (!strcmp(k, "User-Agent")) return 0;
-    if (!strcmp(k, "Accepts")) return 0;
-    if (!strcmp(k, "Accept-Encoding")) return 0;
-    if (!strcmp(k, "Connection")) return 0;
-    if (!strcmp(k, "Proxy-Connection")) return 0;                
-    int i;
-    for (i = 0; i < *hc; ++i) {
-        if (!strcmp(headers[i][0], k)) return 0; // exist
-    }
-    return 1;
-}
-
-void append_header(char *k, char *v, header_t headers, int *hc) {
-    strcpy(headers[*hc][0], k);
-    strcpy(headers[*hc][1], v);    
-    *hc = *hc + 1;
 }
 
 void sigpipe_handler(int sig) {
-    //dbg_printf("[Error]SIGPIPE caught, recovered.\n");        
-    siglongjmp(pipe_buf, -1);
+	//unfinished...
+}
+
+/*
+ * thread's routine when it is invoked
+ */
+void routine(void *connfd) {
+	Pthread_detach(pthread_self()); // 
+
+	unsigned int cache_length;
+	char cache_tag[MAXLINE];
+	char cache_data[MAX_OBJECT_SIZE];
+	int client_fd = *(int *)connfd;
+	int server_fd = -1;
+
+	int ack = Send(client_fd, &server_fd, cache_tag, cache_data, &cache_length);
+
+	switch (ack) {
+		case 0: // cache hit
+			fetch_cache(client_fd, cache_data, cache_length);
+			break;
+		default: // GET
+			in_GET(client_fd, server_fd, cache_tag, cache_data);
+	}
+
+	if (client_fd >= 0) {
+        Close(client_fd);
+    }
+    if (server_fd >= 0) {
+        Close(server_fd);
+    }
+
+	return;
+}
+
+
+int fetch_cache(int client_fd, void *cache_data, unsigned int cache_length) {
+    // forward from cache
+    Rio_writen(client_fd, cache_data, cache_length);
+
+    return 0;
+}
+
+int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
+	rio_t rio_server;
+
+    char buf[MAXBUF];
+    unsigned int cache_length = 0, length = 0, size = 0;
+
+    int flag = 1;
+
+    Rio_readinitb(&rio_server, server_fd);
+    // forward status line and write to cache_data
+    if (Rio_readlineb(&rio_server, buf, MAXLINE) == -1) {
+        return -1;
+    }
+    if (flag) {
+        flag = append_data(cache_data, &cache_length, buf, strlen(buf));
+    }
+    Rio_writen(client_fd, buf, strlen(buf));
+
+    // forward response headers and write to cache_data
+    while (strcmp(buf, "\r\n") != 0 && strlen(buf) > 0) {
+        if (Rio_readlineb(&rio_server, buf, MAXLINE) == -1) {
+            return -1;
+        }
+        get_size(buf, &size);
+        if (flag) {
+            flag = append_data(cache_data, &cache_length, buf, strlen(buf));
+        }
+        Rio_writen(client_fd, buf, strlen(buf));
+    }
+    // forward response body and write to cache_data
+    if (size > 0) {
+        while (size > MAXLINE) {
+            if ((length = Rio_readnb(&rio_server, buf, MAXLINE)) == -1) {
+                return -1;
+            }
+            if (flag) {
+                flag = append_data(cache_data, &cache_length, buf, length);
+            }
+            Rio_writen(client_fd, buf, length);
+
+            size -= MAXLINE;
+        }
+        if (size > 0) {
+            if ((length = Rio_readnb(&rio_server, buf, size)) == -1) {
+                return -1;
+            }
+            if (flag) {
+                flag = append_data(cache_data, &cache_length, buf, length);
+            }
+            Rio_writen(client_fd, buf, length);
+
+        }
+    } else {
+        while ((length = Rio_readnb(&rio_server, buf, MAXLINE)) > 0) {
+            if (flag) {
+                flag = append_data(cache_data, &cache_length, buf, length);
+            }
+            Rio_writen(client_fd, buf, length);
+
+        }
+    }
+    // write cache_data to cache when size smaller than MAX_OBJECT_SIZE
+    if (flag) {
+        
+        cache_node *node = (cache_node *)malloc(sizeof(cache_node));
+        node->tag = (char *)Malloc(sizeof(char) * (strlen(cache_tag) + 1));
+        
+        strcpy(node->tag, cache_tag);
+        node->size = 0;
+        node->data = Malloc(cache_length);
+        node->next = NULL;
+
+        if (node == NULL) {
+            return -1;
+        }
+
+        memcpy(node->data, cache_data, cache_length);
+        node->size = cache_length;
+        insert(cache, node);
+        return 0;
+
+    }
+    return 0;
+}
+
+/*
+ * parse_request
+ */
+void parse_request(char *buf, char *method, char *protocol, char *host_port, char *resource, char *version) {
+    char url[MAXLINE];
+    // set resource default to '/'
+    strcpy(resource, "/");
+    sscanf(buf, "%s %s %s", method, url, version);
+    if (strstr(url, "://") != NULL) {
+        // has protocol
+        sscanf(url, "%[^:]://%[^/]%s", protocol, host_port, resource);
+    } else {
+        // no protocols
+        sscanf(url, "%[^/]%s", host_port, resource);
+    }
+}
+
+/*
+ * parse_port - parse host:port (:port optional)to two parts
+ */
+void parse_port(char *host_port, char *remote_host, char *remote_port) {
+    char *tmp = NULL;
+    tmp = index(host_port, ':');
+    if (tmp != NULL) {
+        *tmp = '\0';
+        strcpy(remote_port, tmp + 1);
+    } else {
+        strcpy(remote_port, "80");
+    }
+    strcpy(remote_host, host_port);
+}
+
+int append_data(char *content, unsigned int *content_length, char *buf, unsigned int length) {
+    if ((*content_length + length) > MAX_OBJECT_SIZE) {
+        return 0;
+    }
+    void *ptr = (void *)((char *)content + *content_length);
+    memcpy(ptr, buf, length);
+    *content_length = *content_length + length;
+    return 1;
+}
+
+void get_size(char *buf, unsigned int *size_pointer) {
+    if (strstr(buf, "Content-Length")) {
+        sscanf(buf, "Content-Length: %d", size_pointer);
+    }
 }
