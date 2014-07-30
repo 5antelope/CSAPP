@@ -20,7 +20,7 @@ static const char *proxy_connection_hdr = "Proxy-Connection: close\r\n";
 /* SIGPIPE handler */
 void sigpipe_handler(int sig);
 void routine(void *connfd);
-//int Send(int fd, int *server_fd, char *cache_tag, void *cache_data, unsigned int *cache_length);
+int Send(int fd, int *server_fd, char *cache_tag, void *cache_data, unsigned int *cache_length);
 int fetch_cache(int client_fd, void *cache_data, unsigned int cache_length);
 int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data);
 void parse_request(char *buf, char *method, char *protocol, char *host_port, char *resource, char *version);
@@ -105,6 +105,143 @@ void routine(void *connfd) {
 	return;
 }
 
+int Send(int fd, int *server_fd, char *cache_tag, void *cache_data, unsigned int *cache_length) {
+	char buf[MAXLINE], 
+         init_request[MAXLINE],
+         init_header[MAXLINE].
+         request_buf[MAXLINE],         
+         method[MAXLINE], 
+         protocol[MAXLINE],
+         host_port[MAXLINE],
+         remote_host[MAXLINE], 
+         remote_port[MAXLINE], 
+         resource[MAXLINE],
+         version[MAXLINE];
+
+    rio_t rio_client;
+
+    strcpy(remote_host, "");
+    strcpy(remote_port, "80");
+
+    memset(cache_data, 0, MAX_OBJECT_SIZE);
+
+    Rio_readinitb(&rio_client, fd);
+
+    Rio_readlineb(&rio_client, buf, MAXLINE);
+
+    strcpy(init_request, buf);
+
+    parse_request(buf, method, protocol, host_port, resource, version);
+
+    parse_port(host_port, remote_host, remote_port);
+
+    if (strstr(method, "GET") != NULL) { // GET method
+        // request line
+        strcpy(request_buf, method);
+        strcat(request_buf, " ");
+        strcat(request_buf, resource);
+        strcat(request_buf, " ");
+
+        // request header
+        while (Rio_readlineb(&rio_client, buf, MAXLINE) != 0) {
+            if (strcmp(buf, "\r\n") == 0) {
+                break;
+            } else if (strstr(buf, "User-Agent:") != NULL) {
+                strcat(request_buf, user_agent_hdr);                
+            } else if (strstr(buf, "Accept-Encoding:") != NULL) {
+                strcat(request_buf, accept_encoding_hdr);
+            } else if (strstr(buf, "Accept:") != NULL) {
+                strcat(request_buf, accept_hdr);
+            } else if (strstr(buf, "Connection:") != NULL) {
+                strcat(request_buf, connection_hdr);
+            } else if (strstr(buf, "Proxy Connection:") != NULL) {
+                strcat(request_buf, proxy_connection_hdr);
+            } else if (strstr(buf, "Host:") != NULL) {
+                strcpy(init_header, buf);
+                if (strlen(remote_host) < 1) {
+                    // if host not specified in request line, get host from host header
+                    sscanf(buf, "Host: %s", host_port);
+                    parse_port(host_port, remote_host, remote_port);
+                }
+                strcat(request_buf, buf);
+            } else {
+                strcat(request_buf, buf);
+            }
+        }
+        
+        strcat(request_buf, "\r\n");
+
+        // compose cache id
+        strcpy(cache_tag, method);
+        strcat(cache_tag, " ");
+        strcat(cache_tag, remote_host);
+        strcat(cache_tag, ":");
+        strcat(cache_tag, remote_port);
+        strcat(cache_tag, resource);
+        strcat(cache_tag, " ");
+        strcat(cache_tag, version);
+
+        // search in the cache
+        cache_node *node = find(cache, cache_tag);
+        if (node != NULL) { // cache hit
+            *cache_length = node->size;
+            memcpy(cache_data, node->data, *cache_length);
+
+            // LRU policy
+            P(&(cache->c_mutex));
+            node = evict(cache, cache_tag);
+            insert(cache, node);
+            V(&(cache->c_mutex));
+
+            return 0;
+        } else {
+            P(&(cache->w_mutex));
+                cache->readcnt--;
+                if (cache->readcnt == 0) {
+                    V(&(cache->c_mutex));
+                }
+                V(&(cache->w_mutex));
+        }
+        // client to server
+        *server_fd = Open_clientfd(remote_host, atoi(remote_port));
+        Rio_writen(*server_fd, request_buf, strlen(request_buf));
+
+        return 1;
+    } else {
+        // non GET method
+        unsigned int length = 0, size = 0;
+        strcpy(request_buf, buf);
+        while (strcmp(buf, "\r\n") != 0 && strlen(buf) > 0) {
+            if (Rio_readlineb(&rio_client, buf, MAXLINE) == -1) {
+                return -1;
+            }
+            if (strstr(buf, "Host:") != NULL) {
+                strcpy(init_header, buf);
+            }
+            get_size(buf, &size);
+            strcat(request_buf, buf);
+        }
+        
+        *server_fd = Open_clientfd(remote_host, atoi(remote_port));
+
+        // write request line
+        Rio_writen(*server_fd, request_buf, strlen(request_buf));
+
+        // write request body
+        while (size > MAXLINE) {
+            length = Rio_readnb(&rio_client, buf, MAXLINE);
+            Rio_writen(*server_fd, buf, length);
+
+            size -= MAXLINE;
+        }
+        if (size > 0) {
+            length = Rio_readnb(&rio_client, buf, size);
+            Rio_writen(*server_fd, buf, length);
+
+        }
+        return 1;
+    }
+}
 
 int fetch_cache(int client_fd, void *cache_data, unsigned int cache_length) {
     // forward from cache
