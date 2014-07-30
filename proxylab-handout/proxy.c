@@ -329,16 +329,14 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
         node->data = Malloc(cache_length);
         node->next = NULL;
 
-        if (node == NULL) {
-            return -1;
-        }
 
         memcpy(node->data, cache_data, cache_length);
         node->size = cache_length;
         insert(cache, node);
+        
         return 0;
-
     }
+    
     return 0;
 }
 
