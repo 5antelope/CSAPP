@@ -28,7 +28,7 @@ int fetch_cache(int client_fd, void *cache_data, unsigned int cache_length);
 int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data);
 void parse_request(char *buf, char *method, char *protocol, char *host_port, char *resource, char *version);
 void parse_port(char *host_port, char *remote_host, char *remote_port);
-int append_data(char *content, unsigned int *content_length, char *buf, unsigned int length);
+int Append(char *content, unsigned int *content_length, char *buf);
 void get_size(char *buf, unsigned int *size_pointer);
 /* End of function prototypes */
 
@@ -271,7 +271,7 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
         return -1;
     }
     if (flag) {
-        flag = append_data(cache_data, &cache_length, buf, strlen(buf));
+        flag = Append(cache_data, &cache_length, buf);
     }
     Rio_writen(client_fd, buf, strlen(buf));
 
@@ -282,7 +282,7 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
         }
         get_size(buf, &size);
         if (flag) {
-            flag = append_data(cache_data, &cache_length, buf, strlen(buf));
+            flag = Append(cache_data, &cache_length, buf);
         }
         Rio_writen(client_fd, buf, strlen(buf));
     }
@@ -293,7 +293,7 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
                 return -1;
             }
             if (flag) {
-                flag = append_data(cache_data, &cache_length, buf, length);
+                flag = Append(cache_data, &cache_length, buf);
             }
             Rio_writen(client_fd, buf, length);
 
@@ -304,7 +304,7 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
                 return -1;
             }
             if (flag) {
-                flag = append_data(cache_data, &cache_length, buf, length);
+                flag = Append(cache_data, &cache_length, buf);
             }
             Rio_writen(client_fd, buf, length);
 
@@ -312,7 +312,7 @@ int in_GET(int client_fd, int server_fd, char *cache_tag, void *cache_data) {
     } else {
         while ((length = Rio_readnb(&rio_server, buf, MAXLINE)) > 0) {
             if (flag) {
-                flag = append_data(cache_data, &cache_length, buf, length);
+                flag = Append(cache_data, &cache_length, buf);
             }
             Rio_writen(client_fd, buf, length);
 
@@ -374,10 +374,13 @@ void parse_port(char *host_port, char *remote_host, char *remote_port) {
     strcpy(remote_host, host_port);
 }
 
-int append_data(char *content, unsigned int *content_length, char *buf, unsigned int length) {
+int Append(char *content, unsigned int *content_length, char *buf) {
+    unsigned int length = strlen(buf);
+    
     if ((*content_length + length) > MAX_OBJECT_SIZE) {
         return 0;
     }
+    
     void *ptr = (void *)((char *)content + *content_length);
     memcpy(ptr, buf, length);
     *content_length = *content_length + length;
